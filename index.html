@@ -36,7 +36,8 @@ summary{cursor:pointer}
 <details><summary>保存先・座標系の設定</summary>
 <label>保存先クラウド</label><select id="prov"></select><div id="pf"></div>
 <label>平面直角座標系</label><select id="zone"></select>
-<label>方向線の長さ(m)</label><input id="len" type="number" value="5" min="0.5" step="0.5">
+<label>図の円の半径(m)</label><input id="rad" type="number" value="0.3" min="0.05" step="0.05">
+<label>矢印の長さ(円の外側、m)</label><input id="alen" type="number" value="0.5" min="0.1" step="0.1">
 </details>
 
 <div class="row"><button id="retry">未送信を再送</button><button id="mk" class="main">CAD(DXF)を生成</button></div>
@@ -51,8 +52,8 @@ ZONES.forEach((z,i)=>$('zone').add(new Option(`第${RN[i]}系`,i)));
 const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}};
 const cfg=ld('cfg',{zone:7,dir:'/survey',len:5,token:''});
-$('pname').value=cfg.pname??'IMG_{date}_{time}_{no}';$('zone').value=cfg.zone;$('len').value=cfg.len;
-['zone','len','pname'].forEach(k=>$(k).onchange=()=>{cfg.pname=$('pname').value;cfg.zone=+$('zone').value;cfg.len=+$('len').value;sv('cfg',cfg)});
+$('pname').value=cfg.pname??'IMG_{date}_{time}_{no}';$('zone').value=cfg.zone;$('rad').value=cfg.rad??0.3;$('alen').value=cfg.alen??0.5;
+['zone','rad','alen','pname'].forEach(k=>$(k).onchange=()=>{cfg.pname=$('pname').value;cfg.zone=+$('zone').value;cfg.rad=+$('rad').value;cfg.alen=+$('alen').value;sv('cfg',cfg)});
 const ORG=location.origin;
 const PROV={
  dropbox:{n:'Dropbox',f:[['token','アクセストークン','password'],['dir','保存フォルダ(例: /現場A)']]},
@@ -220,20 +221,20 @@ function tm(lat,lon,zi){
 
 // ---- DXF ----
 function makeDxf(){
-  const L=cfg.len||5,zi=cfg.zone,o=[];
+  const R=cfg.rad||0.3,AL=cfg.alen||0.5,zi=cfg.zone,o=[];
   const E=(...a)=>o.push(...a);
   const line=(ly,x1,y1,x2,y2)=>E(0,'LINE',8,ly,10,x1.toFixed(4),20,y1.toFixed(4),30,0,11,x2.toFixed(4),21,y2.toFixed(4),31,0);
   E(0,'SECTION',2,'TABLES',0,'TABLE',2,'LAYER',70,3);
-  [['PHOTO_POS',1],['PHOTO_DIR',5],['PHOTO_NO',7]].forEach(([n,c])=>E(0,'LAYER',2,n,70,0,62,c,6,'CONTINUOUS'));
+  [['PHOTO_POS',6],['PHOTO_DIR',6],['PHOTO_NO',6]].forEach(([n,c])=>E(0,'LAYER',2,n,70,0,62,c,6,'CONTINUOUS'));
   E(0,'ENDTAB',0,'ENDSEC',0,'SECTION',2,'ENTITIES');
   log.forEach((m,i)=>{
     const {X,Y}=tm(m.lat,m.lon,zi),x=Y,y=X;   // DXFは x=東, y=北(北が上)
-    E(0,'CIRCLE',8,'PHOTO_POS',10,x.toFixed(4),20,y.toFixed(4),30,0,40,0.3);
-    E(0,'TEXT',8,'PHOTO_NO',10,(x+0.5).toFixed(4),20,(y-0.5).toFixed(4),30,0,40,0.5,1,'No.'+(i+1)+(m.hdg!=null?' az'+m.hdg.toFixed(0):''));
+    E(0,'CIRCLE',8,'PHOTO_POS',10,x.toFixed(4),20,y.toFixed(4),30,0,40,R);
+    {const t=String(i+1),th=R*(t.length<=2?1:0.75);E(0,'TEXT',8,'PHOTO_NO',10,x.toFixed(4),20,y.toFixed(4),30,0,40,th.toFixed(3),1,t,72,1,11,x.toFixed(4),21,y.toFixed(4),31,0,73,2);}
     if(m.hdg==null)return;
-    const h=m.hdg*Math.PI/180,x2=x+L*Math.sin(h),y2=y+L*Math.cos(h);
-    line('PHOTO_DIR',x,y,x2,y2);
-    for(const d of[150,-150]){const g=h+d*Math.PI/180;line('PHOTO_DIR',x2,y2,x2+0.8*Math.sin(g),y2+0.8*Math.cos(g))}
+    const h=m.hdg*Math.PI/180,sn=Math.sin(h),cs=Math.cos(h),xs=x+R*sn,ys=y+R*cs,x2=xs+AL*sn,y2=ys+AL*cs,hl=Math.min(R*0.6,AL*0.7),hw=R*0.22,bx=x2-hl*sn,by=y2-hl*cs;
+    line('PHOTO_DIR',xs,ys,bx,by);E(0,'SOLID',8,'PHOTO_DIR',10,x2.toFixed(4),20,y2.toFixed(4),30,0,11,(bx+hw*cs).toFixed(4),21,(by-hw*sn).toFixed(4),31,0,12,(bx-hw*cs).toFixed(4),22,(by+hw*sn).toFixed(4),32,0,13,(bx-hw*cs).toFixed(4),23,(by+hw*sn).toFixed(4),33,0);
+    
   });
   E(0,'ENDSEC',0,'EOF');
   const s=[];for(let i=0;i<o.length;i+=2)s.push(o[i],o[i+1]);
