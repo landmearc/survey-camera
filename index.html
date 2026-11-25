@@ -23,6 +23,8 @@ summary{cursor:pointer}
 #list li{padding:6px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
 .ok{color:var(--ok)}.wait{color:var(--ac)}.ng{color:var(--ng)}
 #msg{min-height:1.5em;color:var(--dim);font-size:13px}
+.note{color:var(--dim);font-size:12px;margin-top:6px}
+#pf button{margin-top:8px;width:100%}
 </style></head><body>
 <div id="view"><video id="v" playsinline muted autoplay></video><div id="hud"><span id="gps">GPS --</span><span id="hdg">方位 --</span></div></div>
 <div class="row"><button id="start" class="main">カメラ・センサー開始</button></div>
@@ -32,8 +34,7 @@ summary{cursor:pointer}
 <div id="msg"></div>
 
 <details><summary>保存先・座標系の設定</summary>
-<label>Dropbox アクセストークン(アプリフォルダ権限)</label><input id="token" type="password" autocomplete="off">
-<label>保存フォルダ(例: /現場A)</label><input id="dir" placeholder="/survey">
+<label>保存先クラウド</label><select id="prov"></select><div id="pf"></div>
 <label>平面直角座標系</label><select id="zone"></select>
 <label>方向線の長さ(m)</label><input id="len" type="number" value="5" min="0.5" step="0.5">
 </details>
@@ -50,8 +51,25 @@ ZONES.forEach((z,i)=>$('zone').add(new Option(`第${RN[i]}系`,i)));
 const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}};
 const cfg=ld('cfg',{zone:7,dir:'/survey',len:5,token:''});
-$('pname').value=cfg.pname??'IMG_{date}_{time}_{no}';$('token').value=cfg.token;$('dir').value=cfg.dir;$('zone').value=cfg.zone;$('len').value=cfg.len;
-['token','dir','zone','len','pname'].forEach(k=>$(k).onchange=()=>{cfg.pname=$('pname').value;cfg.token=$('token').value.trim();cfg.dir=$('dir').value.trim().replace(/\/$/,'');cfg.zone=+$('zone').value;cfg.len=+$('len').value;sv('cfg',cfg)});
+$('pname').value=cfg.pname??'IMG_{date}_{time}_{no}';$('zone').value=cfg.zone;$('len').value=cfg.len;
+['zone','len','pname'].forEach(k=>$(k).onchange=()=>{cfg.pname=$('pname').value;cfg.zone=+$('zone').value;cfg.len=+$('len').value;sv('cfg',cfg)});
+const ORG=location.origin;
+const PROV={
+ dropbox:{n:'Dropbox',f:[['token','アクセストークン','password'],['dir','保存フォルダ(例: /現場A)']]},
+ gdrive:{n:'Google Drive',f:[['cid','OAuthクライアントID(ウェブ)'],['dir','保存フォルダ名(例: 現場A)']],note:'承認済みJavaScript生成元に '+ORG+' を登録。サインインは約1時間ごとに必要です。'},
+ box:{n:'Box',f:[['token','アクセストークン','password'],['dir','保存先フォルダID(ルートは0)']],note:'アプリのCORSドメインに '+ORG+' を登録してください。開発者トークンは60分で切れます。'},
+ syno:{n:'Synology',f:[['host','NASのURL(例: https://nas.example.com:5001)'],['user','アカウント'],['dir','保存フォルダ(例: /photo/現場A)']],note:'HTTPSでの公開と、'+ORG+' を許可するCORSヘッダが必要です。パスワードは保存せず、初回送信時に入力します。'},
+ github:{n:'GitHub',f:[['token','アクセストークン','password'],['repo','リポジトリ(例: landmearc/survey-photos)'],['dir','フォルダ(例: 現場A)']],note:'写真用は非公開リポジトリにしてください。'}
+};
+cfg.prov=cfg.prov||'github';cfg.s=cfg.s||{dropbox:{token:cfg.token||'',dir:cfg.dir||''}};cfg.s.github=cfg.s.github||{repo:'landmearc/survey-photos',dir:'photos'};
+Object.entries(PROV).forEach(([k,v])=>$('prov').add(new Option(v.n,k)));$('prov').value=cfg.prov;
+function drawPF(){
+  const P=PROV[cfg.prov],s=cfg.s[cfg.prov]=cfg.s[cfg.prov]||{};
+  $('pf').innerHTML=P.f.map(([k,l,t])=>`<label>${l}</label><input data-k="${k}" type="${t||'text'}" autocomplete="off" value="${(s[k]||'').replace(/"/g,'&quot;')}">`).join('')+(P.note?`<div class="note">${P.note}</div>`:'');
+  $('pf').querySelectorAll('input').forEach(i=>i.onchange=()=>{s[i.dataset.k]=i.value.trim();sv('cfg',cfg)});
+  if(cfg.prov==='gdrive'){const b=document.createElement('button');b.textContent='Googleにサインイン';b.onclick=()=>gToken(s).then(()=>say('サインインしました')).catch(e=>say('サインイン失敗: '+e.message));$('pf').append(b)}
+}
+$('prov').onchange=()=>{cfg.prov=$('prov').value;sv('cfg',cfg);drawPF()};drawPF();
 let log=ld('log',[]),pending=[],pos=null,head=null;
 const say=t=>$('msg').textContent=t;
 
@@ -104,14 +122,74 @@ $('shot').onclick=()=>{
 };
 
 // ---- upload to Dropbox, then drop the image ----
-async function put(path,body){
+async function putDropbox(path,body,s){
   const r=await fetch('https://content.dropboxapi.com/2/files/upload',{method:'POST',
-    headers:{Authorization:'Bearer '+cfg.token,'Dropbox-API-Arg':esc(JSON.stringify({path:(cfg.dir||'')+'/'+path,mode:'overwrite',mute:true})),'Content-Type':'application/octet-stream'},body});
+    headers:{Authorization:'Bearer '+s.token,'Dropbox-API-Arg':esc(JSON.stringify({path:(D(s)?'/'+D(s):'')+'/'+path,mode:'overwrite',mute:true})),'Content-Type':'application/octet-stream'},body});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+}
+const D=s=>(s.dir||'').replace(/^\/+|\/+$/g,'');
+const S=()=>cfg.s[cfg.prov]||{};
+function ready(){const s=S();return({dropbox:['token'],gdrive:['cid'],box:['token'],syno:['host','user','dir'],github:['token','repo']})[cfg.prov].every(k=>s[k])}
+async function put(path,body){
+  const f={dropbox:putDropbox,gdrive:putGdrive,box:putBox,syno:putSyno,github:putGithub}[cfg.prov];
+  return f(path,body,S());
+}
+// Google Drive (drive.file: このアプリが作ったフォルダ・ファイルのみ操作)
+let gTok=null,gExp=0;const gFolder={};
+function gToken(s){return new Promise((ok,ng)=>{
+  if(gTok&&Date.now()<gExp)return ok(gTok);
+  const go=()=>google.accounts.oauth2.initTokenClient({client_id:s.cid,scope:'https://www.googleapis.com/auth/drive.file',
+    callback:r=>{if(r.error)return ng(new Error(r.error));gTok=r.access_token;gExp=Date.now()+(r.expires_in-60)*1000;ok(gTok)}}).requestAccessToken({prompt:''});
+  if(window.google&&google.accounts)return go();
+  const sc=document.createElement('script');sc.src='https://accounts.google.com/gsi/client';sc.onload=go;
+  sc.onerror=()=>ng(new Error('Googleスクリプトを読み込めません'));document.head.append(sc);
+})}
+async function putGdrive(path,body,s){
+  const H={Authorization:'Bearer '+await gToken(s)};let fid=gFolder[D(s)];
+  if(!fid&&D(s)){
+    const q=encodeURIComponent(`name='${D(s).replace(/'/g,"\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    let r=await(await fetch('https://www.googleapis.com/drive/v3/files?q='+q,{headers:H})).json();
+    fid=r.files&&r.files[0]&&r.files[0].id;
+    if(!fid){r=await(await fetch('https://www.googleapis.com/drive/v3/files',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({name:D(s),mimeType:'application/vnd.google-apps.folder'})})).json();fid=r.id}
+    if(!fid)throw new Error('フォルダを作成できません');
+    gFolder[D(s)]=fid;
+  }
+  const fd=new FormData();
+  fd.append('metadata',new Blob([JSON.stringify({name:path,...(fid?{parents:[fid]}:{})})],{type:'application/json'}));fd.append('file',body);
+  const r=await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',{method:'POST',headers:H,body:fd});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+}
+async function putBox(path,body,s){
+  const fd=new FormData();
+  fd.append('attributes',JSON.stringify({name:path,parent:{id:s.dir||'0'}}));fd.append('file',body,path);
+  const r=await fetch('https://upload.box.com/api/2.0/files/content',{method:'POST',headers:{Authorization:'Bearer '+s.token},body:fd});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+}
+// Synology File Station(パスワードは保存しない)
+let sSid=null;
+async function putSyno(path,body,s){
+  const base=s.host.replace(/\/+$/,'')+'/webapi/entry.cgi';
+  if(!sSid){
+    const pw=prompt('Synology パスワード('+s.user+')');if(!pw)throw new Error('パスワード未入力');
+    const j=await(await fetch(base,{method:'POST',body:new URLSearchParams({api:'SYNO.API.Auth',version:'6',method:'login',account:s.user,passwd:pw,session:'FileStation',format:'sid'})})).json();
+    if(!j.success)throw new Error('ログイン失敗 code '+(j.error&&j.error.code));
+    sSid=j.data.sid;
+  }
+  const fd=new FormData();fd.append('path','/'+D(s));fd.append('create_parents','true');fd.append('overwrite','true');fd.append('file',body,path);
+  const j=await(await fetch(base+'?api=SYNO.FileStation.Upload&version=2&method=upload&_sid='+sSid,{method:'POST',body:fd})).json();
+  if(!j.success){sSid=null;throw new Error('code '+(j.error&&j.error.code))}
+}
+async function putGithub(path,body,s){
+  const b64=await new Promise(ok=>{const f=new FileReader();f.onload=()=>ok(f.result.split(',')[1]);f.readAsDataURL(body)});
+  const u='https://api.github.com/repos/'+s.repo+'/contents/'+(D(s)?D(s).split('/').map(encodeURIComponent).join('/')+'/':'')+encodeURIComponent(path);
+  const H={Authorization:'Bearer '+s.token,Accept:'application/vnd.github+json'};
+  const g=await fetch(u,{headers:H}),sha=g.ok?(await g.json()).sha:undefined;
+  const r=await fetch(u,{method:'PUT',headers:H,body:JSON.stringify({message:'add '+path,content:b64,...(sha?{sha}:{})})});
   if(!r.ok)throw new Error('HTTP '+r.status);
 }
 let busy=false;
 async function flush(){
-  if(busy||!cfg.token)return;busy=true;
+  if(busy||!ready())return;busy=true;
   for(const p of [...pending]){
     try{
       await put(p.meta.name+'.jpg',p.blob);
@@ -165,7 +243,7 @@ $('mk').onclick=async()=>{
   if(!log.length){say('撮影記録がありません');return}
   const txt=makeDxf(),name='photo_plot_'+new Date().toISOString().slice(0,10)+'.dxf';
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/dxf'}));a.download=name;a.click();
-  if(cfg.token)try{await put(name,new Blob([txt]));say('DXFを保存し、クラウドにも送信しました')}catch(e){say('DXFはダウンロード済み(クラウド送信失敗: '+e.message+')')}
+  if(ready())try{await put(name,new Blob([txt]));say('DXFを保存し、クラウドにも送信しました')}catch(e){say('DXFはダウンロード済み(クラウド送信失敗: '+e.message+')')}
   else say('DXFをダウンロードしました');
 };
 $('clr').onclick=()=>{if(confirm('端末内の撮影記録を消します(クラウド上のデータは残ります)'))
