@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>測量カメラ</title>
+<style>
+:root{--bg:#1c2430;--panel:#26303f;--line:#3a4658;--fg:#eef1f5;--dim:#9aa7ba;--ac:#ff7a1a;--ok:#5bc489;--ng:#ff6b6b}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "Hiragino Sans","Noto Sans JP",system-ui,sans-serif}
+body{padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom)}
+#view{position:relative;margin:8px 0}
+video{width:100%;aspect-ratio:4/3;object-fit:cover;background:#000;border-radius:6px;display:block}
+#hud{position:absolute;left:8px;bottom:8px;right:8px;display:flex;gap:8px;font-variant-numeric:tabular-nums;font-size:13px}
+#hud span{background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px}
+.row{display:flex;gap:8px;margin:8px 0;align-items:center}
+button{flex:1;padding:12px;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;font:inherit}
+button.main{background:var(--ac);border-color:var(--ac);color:#1c1000;font-weight:700}
+#shot{flex:0 0 76px;height:76px;border-radius:50%;margin:0 auto;display:block;background:var(--fg);border:6px solid var(--ac)}
+input,select{width:100%;padding:9px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;font:inherit}
+label{display:block;color:var(--dim);font-size:12px;margin-top:8px}
+details{background:var(--panel);border-radius:6px;padding:8px 12px;margin:8px 0}
+summary{cursor:pointer}
+#list{list-style:none;padding:0;margin:8px 0;font-size:13px;font-variant-numeric:tabular-nums}
+#list li{padding:6px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
+.ok{color:var(--ok)}.wait{color:var(--ac)}.ng{color:var(--ng)}
+#msg{min-height:1.5em;color:var(--dim);font-size:13px}
+</style></head><body>
+<div id="view"><video id="v" playsinline muted autoplay></video><div id="hud"><span id="gps">GPS --</span><span id="hdg">方位 --</span></div></div>
+<div class="row"><button id="start" class="main">カメラ・センサー開始</button></div>
+<label>写真名({no}連番 {date}日付 {time}時刻 が使えます。撮影ごとに変更可)</label>
+<input id="pname" placeholder="例: 現場A_{no}">
+<div class="row"><button id="shot" aria-label="撮影" disabled></button></div>
+<div id="msg"></div>
+
+<details><summary>保存先・座標系の設定</summary>
+<label>Dropbox アクセストークン(アプリフォルダ権限)</label><input id="token" type="password" autocomplete="off">
+<label>保存フォルダ(例: /現場A)</label><input id="dir" placeholder="/survey">
+<label>平面直角座標系</label><select id="zone"></select>
+<label>方向線の長さ(m)</label><input id="len" type="number" value="5" min="0.5" step="0.5">
+</details>
+
+<div class="row"><button id="retry">未送信を再送</button><button id="mk" class="main">CAD(DXF)を生成</button></div>
+<ul id="list"></ul>
+<div class="row"><button id="clr">記録をクリア</button></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const ZONES=[[33,129.5],[33,131],[36,132+10/60],[33,133.5],[36,134+20/60],[36,136],[36,137+10/60],[36,138.5],[36,139+50/60],[40,140+50/60],[44,140.25],[44,142.25],[44,144.25],[26,142],[26,127.5],[26,124],[26,131],[20,136],[26,154]];
+const RN=['Ⅰ','Ⅱ','Ⅲ','Ⅳ','Ⅴ','Ⅵ','Ⅶ','Ⅷ','Ⅸ','Ⅹ','ⅩⅠ','ⅩⅡ','ⅩⅢ','ⅩⅣ','ⅩⅤ','ⅩⅥ','ⅩⅦ','ⅩⅧ','ⅩⅨ'];
+ZONES.forEach((z,i)=>$('zone').add(new Option(`第${RN[i]}系`,i)));
+const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
+const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}};
+const cfg=ld('cfg',{zone:7,dir:'/survey',len:5,token:''});
+$('pname').value=cfg.pname??'IMG_{date}_{time}_{no}';$('token').value=cfg.token;$('dir').value=cfg.dir;$('zone').value=cfg.zone;$('len').value=cfg.len;
+['token','dir','zone','len','pname'].forEach(k=>$(k).onchange=()=>{cfg.pname=$('pname').value;cfg.token=$('token').value.trim();cfg.dir=$('dir').value.trim().replace(/\/$/,'');cfg.zone=+$('zone').value;cfg.len=+$('len').value;sv('cfg',cfg)});
+let log=ld('log',[]),pending=[],pos=null,head=null;
+const say=t=>$('msg').textContent=t;
+
+// ---- sensors ----
+function onOri(e){
+  if(e.webkitCompassHeading!=null){head=e.webkitCompassHeading}
+  else if(e.alpha!=null&&(e.absolute||e.type==='deviceorientationabsolute')){
+    const r=Math.PI/180,A=e.alpha*r,B=e.beta*r,G=e.gamma*r;
+    const vx=-Math.cos(A)*Math.sin(G)-Math.sin(A)*Math.sin(B)*Math.cos(G);
+    const vy=-Math.sin(A)*Math.sin(G)+Math.cos(A)*Math.sin(B)*Math.cos(G);
+    head=(Math.atan2(vx,vy)/r+360)%360;   // 背面カメラの向き(真北から時計回り)
+  } else return;
+  $('hdg').textContent='方位 '+head.toFixed(0)+'°';
+}
+$('start').onclick=async()=>{
+  try{
+    if(window.DeviceOrientationEvent&&DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission();
+    addEventListener('deviceorientationabsolute',onOri,true);addEventListener('deviceorientation',onOri,true);
+    navigator.geolocation.watchPosition(p=>{pos=p;$('gps').textContent='GPS ±'+p.coords.accuracy.toFixed(0)+'m'},e=>say('位置情報エラー: '+e.message),{enableHighAccuracy:true,maximumAge:0});
+    $('v').srcObject=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:960}},audio:false});
+    $('shot').disabled=false;$('start').style.display='none';say('撮影できます');
+  }catch(e){say('開始できません: '+e.message+'(HTTPS配信が必要です)')}
+};
+
+// ---- photo name ----
+const esc=s=>s.replace(/[\u007f-\uffff]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0'));  // Dropboxヘッダ用に非ASCIIをエスケープ
+function makeName(){
+  const d=new Date(),p=n=>String(n).padStart(2,'0');
+  const date=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate()),time=p(d.getHours())+p(d.getMinutes())+p(d.getSeconds());
+  let t=($('pname').value.trim()||'IMG_{date}_{time}_{no}')
+    .replace(/\{no\}/g,String(log.length+1).padStart(3,'0')).replace(/\{date\}/g,date).replace(/\{time\}/g,time)
+    .replace(/[\\/:*?"<>|&]/g,'_').replace(/\.(jpe?g)$/i,'').slice(0,100);
+  let n=t,i=2;while(log.some(m=>m.name===n))n=t+'_'+i++;   // 同名は _2, _3… を付ける
+  return n;
+}
+
+// ---- capture (VGA) ----
+$('shot').onclick=()=>{
+  const v=$('v');if(!v.videoWidth)return;
+  if(!pos){say('位置を取得中です');return}
+  const meta={name:makeName(),
+    t:new Date().toISOString(),lat:pos.coords.latitude,lon:pos.coords.longitude,acc:pos.coords.accuracy,hdg:head};
+  const w=v.videoWidth,h=v.videoHeight,land=w>=h,tw=land?640:480,th=land?480:640,asp=tw/th;
+  let sw=w,sh=h;if(w/h>asp)sw=h*asp;else sh=w/asp;
+  const c=document.createElement('canvas');c.width=tw;c.height=th;
+  c.getContext('2d').drawImage(v,(w-sw)/2,(h-sh)/2,sw,sh,0,0,tw,th);
+  log.push(meta);sv('log',log);
+  c.toBlob(b=>{pending.push({meta,blob:b});render();flush()},'image/jpeg',0.85);
+  if(head==null)say('方位が取得できていません(位置のみ記録)');
+};
+
+// ---- upload to Dropbox, then drop the image ----
+async function put(path,body){
+  const r=await fetch('https://content.dropboxapi.com/2/files/upload',{method:'POST',
+    headers:{Authorization:'Bearer '+cfg.token,'Dropbox-API-Arg':esc(JSON.stringify({path:(cfg.dir||'')+'/'+path,mode:'overwrite',mute:true})),'Content-Type':'application/octet-stream'},body});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+}
+let busy=false;
+async function flush(){
+  if(busy||!cfg.token)return;busy=true;
+  for(const p of [...pending]){
+    try{
+      await put(p.meta.name+'.jpg',p.blob);
+      await put(p.meta.name+'.json',new Blob([JSON.stringify(p.meta)]));
+      pending.splice(pending.indexOf(p),1);        // 画像データを端末から破棄
+      p.meta.up=1;sv('log',log);
+    }catch(e){say('送信失敗: '+e.message);break}
+  }
+  busy=false;render();
+}
+$('retry').onclick=flush;
+
+// ---- plane rectangular coordinates (GRS80, 横メルカトル) ----
+function tm(lat,lon,zi){
+  const [p0,l0]=ZONES[zi],R=Math.PI/180,a=6378137,f=1/298.257222101,n=f/(2-f),k=0.9999;
+  const Ab=a/(1+n)*(1+n*n/4+n**4/64),e=Math.sqrt(f*(2-f));
+  const al=[n/2-2*n*n/3+5*n**3/16+41*n**4/180,13*n*n/48-3*n**3/5+557*n**4/1440,61*n**3/240-103*n**4/140,49561*n**4/161280];
+  const xi=(ph,dl)=>{
+    const s=Math.sin(ph),t=Math.sinh(Math.atanh(s)-e*Math.atanh(e*s));
+    const x1=Math.atan2(t,Math.cos(dl)),y1=Math.atanh(Math.sin(dl)/Math.hypot(1,t));
+    let x=x1,y=y1;
+    al.forEach((c,j)=>{const m=2*(j+1);x+=c*Math.sin(m*x1)*Math.cosh(m*y1);y+=c*Math.cos(m*x1)*Math.sinh(m*y1)});
+    return[x,y];
+  };
+  const [x0]=xi(p0*R,0),[x,y]=xi(lat*R,(lon-l0)*R);
+  return{X:k*Ab*(x-x0),Y:k*Ab*y};   // X=北, Y=東
+}
+
+// ---- DXF ----
+function makeDxf(){
+  const L=cfg.len||5,zi=cfg.zone,o=[];
+  const E=(...a)=>o.push(...a);
+  const line=(ly,x1,y1,x2,y2)=>E(0,'LINE',8,ly,10,x1.toFixed(4),20,y1.toFixed(4),30,0,11,x2.toFixed(4),21,y2.toFixed(4),31,0);
+  E(0,'SECTION',2,'TABLES',0,'TABLE',2,'LAYER',70,3);
+  [['PHOTO_POS',1],['PHOTO_DIR',5],['PHOTO_NO',7]].forEach(([n,c])=>E(0,'LAYER',2,n,70,0,62,c,6,'CONTINUOUS'));
+  E(0,'ENDTAB',0,'ENDSEC',0,'SECTION',2,'ENTITIES');
+  log.forEach((m,i)=>{
+    const {X,Y}=tm(m.lat,m.lon,zi),x=Y,y=X;   // DXFは x=東, y=北(北が上)
+    E(0,'CIRCLE',8,'PHOTO_POS',10,x.toFixed(4),20,y.toFixed(4),30,0,40,0.3);
+    E(0,'TEXT',8,'PHOTO_NO',10,(x+0.5).toFixed(4),20,(y-0.5).toFixed(4),30,0,40,0.5,1,'No.'+(i+1)+(m.hdg!=null?' az'+m.hdg.toFixed(0):''));
+    if(m.hdg==null)return;
+    const h=m.hdg*Math.PI/180,x2=x+L*Math.sin(h),y2=y+L*Math.cos(h);
+    line('PHOTO_DIR',x,y,x2,y2);
+    for(const d of[150,-150]){const g=h+d*Math.PI/180;line('PHOTO_DIR',x2,y2,x2+0.8*Math.sin(g),y2+0.8*Math.cos(g))}
+  });
+  E(0,'ENDSEC',0,'EOF');
+  const s=[];for(let i=0;i<o.length;i+=2)s.push(o[i],o[i+1]);
+  return s.join('\r\n');
+}
+$('mk').onclick=async()=>{
+  if(!log.length){say('撮影記録がありません');return}
+  const txt=makeDxf(),name='photo_plot_'+new Date().toISOString().slice(0,10)+'.dxf';
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/dxf'}));a.download=name;a.click();
+  if(cfg.token)try{await put(name,new Blob([txt]));say('DXFを保存し、クラウドにも送信しました')}catch(e){say('DXFはダウンロード済み(クラウド送信失敗: '+e.message+')')}
+  else say('DXFをダウンロードしました');
+};
+$('clr').onclick=()=>{if(confirm('端末内の撮影記録を消します(クラウド上のデータは残ります)'))
+  {log=[];pending=[];sv('log',log);render()}};
+
+function render(){
+  $('list').innerHTML=log.slice().reverse().map(m=>{
+    const w=pending.some(p=>p.meta===m);
+    return `<li><span>${m.name} ${m.hdg!=null?m.hdg.toFixed(0)+'°':'—'}</span><span class="${m.up?'ok':w?'wait':'ng'}">${m.up?'保存済み':w?'送信待ち':'未送信'}</span></li>`}).join('');
+}
+render();
+</script></body></html>
